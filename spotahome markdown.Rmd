@@ -1,0 +1,217 @@
+---
+title: "spotahome"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Preliminary analysis
+
+Preview of the data included in the dataframe
+
+```{r dataload, include=FALSE}
+library(DBI)
+library(RSQLite)
+library(dplyr)
+library(tidyverse)
+con <- dbConnect(SQLite(), "exercise_final.db")
+
+
+as.data.frame(dbListTables(con))
+ 
+
+access_log <- dbReadTable(con, 'access_log')
+```
+```{r preview, echo=FALSE}
+print(summary(access_log))
+
+dup_book_req <- access_log[access_log$event_type == "booking_request",]
+revenue <- subset(dup_book_req, (dup_book_req$revenue <= 0) | is.na(dup_book_req$revenue))
+print("Number of data with revenue 0 or NA")
+print(nrow(revenue))
+
+access_log1 <- anti_join(access_log,revenue, by = c("user_id", "variant"))
+print("Number of current data in the dataset")
+print(nrow(access_log1))
+```
+
+The first thing we can see is that revenue minimum value is 0.
+
+After that, I am checking if there are data with revenue 0 or below and I delete it.
+
+After that cleaning, we check that we have yet a user with duplicated booking request.
+```{r revenue, echo=FALSE}
+dup_book_req <- access_log1[access_log1$event_type == "booking_request",]
+print("Number of booking request:")
+print(nrow(dup_book_req))
+print("Number of duplicated users:")
+dup_user <- dup_book_req[duplicated(dup_book_req$user_id), ] 
+print(nrow(dup_user))
+print("It is an user with requests in both variants, as long as I have more data in variant A, I delete it from variant B")
+access_log2 <- anti_join(access_log1,dup_user, by = c("user_id", "variant"))
+
+```
+Final check is if we have more users in both variants:
+
+```{r variants, echo=FALSE}
+user_var <- access_log2[,c("user_id", "variant")]
+
+user_var_uni <- unique(user_var)
+
+user_dup <- user_var_uni[duplicated(user_var_uni$user_id),]
+
+log_dup <- filter(access_log2,
+                       user_id %in% user_dup$user_id)
+
+print(table(access_log2$variant))
+
+print(table(log_dup$variant,log_dup$event_type))
+
+print("I will delete the duplicated in the variant where they didn't made a booking request")
+
+user_BR <- filter(log_dup, event_type == "booking_request")
+
+user_delete <- anti_join(log_dup,user_BR, by =c("user_id", "variant"))
+
+user_delete2 <- filter(user_delete,user_id %in% user_BR$user_id)
+
+access_log3 <- anti_join(access_log2,user_delete2, by =c("user_id", "variant"))
+
+user_var <- access_log3[,c("user_id", "variant")]
+
+user_var_uni <- unique(user_var)
+
+user_dup <- user_var_uni[duplicated(user_var_uni$user_id),]
+
+log_dup <- filter(access_log3,
+                       user_id %in% user_dup$user_id)
+
+print(table(access_log3$variant))
+
+print(table(log_dup$variant,log_dup$event_type))
+
+print("Now we only have duplicated users without booking requests, more in the variant as total data is higher in variant A, I decide to delete them from there")
+
+log_dup <- filter(access_log3,
+                       user_id %in% user_dup$user_id & variant == "A")
+
+access_log4 <- anti_join(access_log3,log_dup, by =c("user_id", "variant"))
+
+user_var <- access_log4[,c("user_id", "variant")]
+
+user_var_uni <- unique(user_var)
+
+user_dup <- user_var_uni[duplicated(user_var_uni$user_id),]
+
+print("We finally have no duplicated in the database:")
+
+print(nrow(user_dup))
+
+```
+## Data Analysis CVR
+
+Now we can start with the analysis of the data.
+
+First working with conversion rate
+
+Following I have done a proportion test and a chi-square test and both tell us that there is difference with 95% of confidence, but not at 99%
+
+```{r cvr, echo=FALSE}
+user_BR <- filter(access_log4, event_type == "booking_request")
+
+access_log4$BR <- 0
+
+access_log5 <- within(access_log4, BR[user_id %in% user_BR$user_id] <- 1)
+
+Conv_rate <- unique(access_log5[c("user_id", "variant", "BR")])
+
+
+control_sz<-length(which(Conv_rate$variant=="A"))
+exp_sz<-length(which(Conv_rate$variant=="B"))
+control_yes<-length(which(Conv_rate$variant=="A" & Conv_rate$BR=="1"))
+exp_yes<-length(which(Conv_rate$variant=="B" & Conv_rate$BR=="1"))
+prop.test(c (control_yes, exp_yes), c (control_sz, exp_sz), conf.level = 0.95)
+prop.test(c (control_yes, exp_yes), c (control_sz, exp_sz), conf.level = 0.99)
+
+
+ch_test<-chisq.test(Conv_rate$variant,Conv_rate$BR) #p-value < 0.05
+
+ch_test$p.value
+
+ch_test$stdres
+
+```
+## Data Analysis Revenue per user
+
+With the revenue per user, we have to change the tests, because it is a continuous variable, and, running T test, we get statistically significant at 95%
+
+```{r rpu, echo=FALSE}
+library(broom)
+rpu <- access_log5 %>% 
+  group_by(user_id, variant) %>% 
+  summarise_all(funs(sum(revenue, na.rm=TRUE))) 
+
+mean_rpu <- access_log5 %>% 
+  group_by(variant) %>% 
+  summarise_all(funs(mean(revenue, na.rm=TRUE))) 
+
+print(table(mean_rpu$variant, mean_rpu$revenue))
+
+print("we hae that revenue is higher in variant B, as expected")
+
+experiment_results <- t.test(revenue ~ variant,
+                          data = rpu) %>%
+  tidy()
+print(experiment_results)
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r density, echo=FALSE}
+
+log_A <- subset(rpu, variant == "A")
+log_B <- subset(rpu, variant == "B")
+
+density.A = density(log_A$revenue, na.rm = T)
+density.B = density(log_B$revenue, na.rm = T)
+# number of points used in density plot
+n.density1 = density.A$n
+n.density2 = density.B$n
+# bandwidth in density plot
+bw.density1 = density.A$bw
+bw.density2 = density.B$bw
+plot(density.B, main = 'Kernel Density Estimates of revenue', xlab = 'REVENUE', ylab = 'Density', ylim = c(0, max(density.A$y, na.rm = T)), lty = 1)
+# add second density plot
+lines(density.A, lty = 3)
+# add legends to state sample sizes and bandwidths; notice use of paste()
+legend(100, 0.015, paste('A: N = ', n.density1, ', Bandwidth = ', round(bw.density1, 1), sep = ''), bty = 'n')
+legend(100, 0.013, paste('B: N = ', n.density2, ', Bandwidth = ', round(bw.density2, 1), sep = ''), bty = 'n')
+# add legend to label plots
+legend(115, 0.011, c('A', 'B'), lty = c(3,1), bty = 'n')
+```
+
+Revenue is concentrated at lower level in variant A
+
+
+```{r avg, echo=FALSE}
+
+avg_BR <- subset(access_log5, event_type == "booking_request")
+
+avg_BR_agg <- avg_BR %>% 
+  group_by(variant) %>% 
+  select(variant, revenue) %>% 
+  summarise_all(funs(mean,sd(., na.rm=TRUE))) 
+
+print("Average and deviation")
+print(avg_BR_agg)
+
+print("Percentage increase")
+
+print(diff(avg_BR_agg$mean)/avg_BR_agg$mean[1])
+
+```
